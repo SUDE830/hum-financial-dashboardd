@@ -1,1 +1,282 @@
+import streamlit as st
+import pandas as pd
+import plotly.express as px
+from pathlib import Path
+
+# =================================================
+# SAYFA AYARI
+# =================================================
+st.set_page_config(
+    page_title="HUM | Gelen Ödemeler",
+    page_icon="💰",
+    layout="wide"
+)
+
+# =================================================
+# PATH & SABİTLER
+# =================================================
+BASE_DIR = Path(__file__).resolve().parent.parent
+EXCEL_PATH = BASE_DIR / "data" / "HUM_DATA2.xlsx"
+LOGO_PATH = BASE_DIR / "hum_logo.png"
+
+# Sayfa İsimleri
+SHEET_PAYMENTS = "ARPV_BANKAGELEN_KUMULE (2)"
+SHEET_DIM = "DIM_PROJELER1"
+
+# KPI Kolon İsimleri (DIM_PROJELER1 sayfasındaki başlıklar)
+COL_SIPARIS = "SİPARİŞ TUTARI"
+COL_SATIS   = "SATIŞ TUTARI"
+COL_MALIYET = "TOPLAM MALIYET"
+COL_TAHSIL  = "TAHSİLAT"
+
+AY_MAP = {
+    1: "Ocak", 2: "Şubat", 3: "Mart", 4: "Nisan",
+    5: "Mayıs", 6: "Haziran", 7: "Temmuz",
+    8: "Ağustos", 9: "Eylül", 10: "Ekim",
+    11: "Kasım", 12: "Aralık"
+}
+AY_SIRA = list(AY_MAP.values())
+
+# ✅ DIM_PROJELER1'de gerçekte kullandığımız KPI kolon isimleri (doğrusu bu)
+# (Üstteki tanımı bozmuyoruz, ama burada doğru kolonları “standart” olarak belirliyoruz)
+COL_SIPARIS = "PROJE SİPARİŞ EURO TUTARLARI"
+COL_SATIS   = "PROJE SATIŞ EURO TUTARLARI"
+COL_MALIYET = "PROJE MALİYET EURO TUTARLARI"
+COL_TAHSIL  = "PROJELERDE GELEN EURO ÖDEMELERİ TUTARI"
+
+# =================================================
+# YARDIMCI FONKSİYONLAR (EKSİKLER TAMAMLANDI)
+# =================================================
+def fmt_money(x):
+    try:
+        return f"{x:,.0f}".replace(",", "_").replace(".", ",").replace("_", ".")
+    except Exception:
+        return "0"
+
+def to_number_tr(s):
+    """Türkçe sayı formatını temizler (1.234,56 -> 1234.56)"""
+    if s is None:
+        return pd.Series(dtype="float")
+    if pd.api.types.is_numeric_dtype(s):
+        return s.fillna(0.0)
+
+    s = s.astype(str).str.replace(r"[^\d,.\-]", "", regex=True)
+    has_dot = s.str.contains(r"\.", regex=True, na=False)
+    has_com = s.str.contains(r",", regex=True, na=False)
+
+    s.loc[has_dot & has_com] = (
+        s.loc[has_dot & has_com]
+        .str.replace(".", "", regex=False)
+        .str.replace(",", ".", regex=False)
+    )
+    s.loc[~has_dot & has_com] = s.loc[~has_dot & has_com].str.replace(",", ".", regex=False)
+    return pd.to_numeric(s, errors="coerce").fillna(0.0)
+
+# ❗ Senin ilk hesapla_kpi fonksiyonun (silmeden bırakıyoruz, ama kullanmayacağız)
+def hesapla_kpi_old(df_secili):
+    """DIM tablosu üzerinden KPI özetlerini hesaplar (eski)"""
+    return {
+        "siparis": df_secili[COL_SIPARIS].sum() if COL_SIPARIS in df_secili.columns else 0,
+        "satis": df_secili[COL_SATIS].sum() if COL_SATIS in df_secili.columns else 0,
+        "maliyet": df_secili[COL_MALIYET].sum() if COL_MALIYET in df_secili.columns else 0,
+        "tahsilat": df_secili[COL_TAHSIL].sum() if COL_TAHSIL in df_secili.columns else 0
+    }
+
+# =================================================
+# DATA LOADING
+# =================================================
+@st.cache_data(show_spinner=False)
+def load_data():
+    # Banka Ödemeleri Verisi
+    df = pd.read_excel(EXCEL_PATH, sheet_name=SHEET_PAYMENTS, engine="openpyxl")
+    df.columns = df.columns.str.strip()
+    df["AY_ADI"] = df["AY"].map(AY_MAP)
+
+    if "PROJE ÖDEMELERİNİN GELDİĞİ TARİH" in df.columns:
+        df["PROJE ÖDEMELERİNİN GELDİĞİ TARİH"] = pd.to_datetime(
+            df["PROJE ÖDEMELERİNİN GELDİĞİ TARİH"], errors="coerce"
+        )
+
+    # KPI Verisi (DIM_PROJELER1)
+    df_dim = pd.read_excel(EXCEL_PATH, sheet_name=SHEET_DIM, engine="openpyxl")
+    df_dim.columns = df_dim.columns.str.strip()
+
+    for c in [COL_SIPARIS, COL_SATIS, COL_MALIYET, COL_TAHSIL]:
+        if c in df_dim.columns:
+            df_dim[c] = to_number_tr(df_dim[c])
+        else:
+            df_dim[c] = 0.0
+
+    # Metin kolon güvenliği
+    for c in ["ProjeKodu", "ŞİRKET", "CARİ İSİM", "ÜLKE ADI"]:
+        if c in df_dim.columns:
+            df_dim[c] = df_dim[c].astype(str).str.strip()
+
+    return df, df_dim
+
+df_raw, df_dim_raw = load_data()
+
+# =================================================
+# BAŞLIK
+# =================================================
+c1, c2 = st.columns([1, 7])
+with c1:
+    if LOGO_PATH.exists():
+        st.image(str(LOGO_PATH), width=120)
+with c2:
+    st.markdown("## HUM | Gelen Ödemeler")
+    st.caption("Banka bazlı aylık tahsilat analizi ve DIM bazlı proje özeti")
+
+st.divider()
+
+# =================================================
+# SIDEBAR – FİLTRELER
+# =================================================
+if st.sidebar.button("🔄 Verileri Güncelle", use_container_width=True):
+    st.cache_data.clear()
+    st.rerun()
+
+st.sidebar.markdown("### 🔎 Filtreler")
+
+df = df_raw.copy()
+df_kpi_filtered = df_dim_raw.copy()
+
+sirket = st.sidebar.selectbox("Şirket", ["Tümü"] + sorted(df["SIRKET"].dropna().unique()))
+if sirket != "Tümü":
+    df = df[df["SIRKET"] == sirket]
+    if "ŞİRKET" in df_kpi_filtered.columns:
+        df_kpi_filtered = df_kpi_filtered[df_kpi_filtered["ŞİRKET"] == sirket]
+
+cari = st.sidebar.selectbox("Cari", ["Tümü"] + sorted(df["CARI_ISIM"].dropna().unique()))
+if cari != "Tümü":
+    df = df[df["CARI_ISIM"] == cari]
+    if "CARİ İSİM" in df_kpi_filtered.columns:
+        df_kpi_filtered = df_kpi_filtered[df_kpi_filtered["CARİ İSİM"] == cari]
+
+proje_ara = st.sidebar.text_input("Proje Kodu Ara", placeholder="Örn: C25...")
+if proje_ara:
+    mask = df["ProjeKodu"].astype(str).str.contains(proje_ara, case=False, na=False)
+    df = df[mask]
+
+    if "ProjeKodu" in df_kpi_filtered.columns:
+        mask_kpi = df_kpi_filtered["ProjeKodu"].astype(str).str.contains(proje_ara, case=False, na=False)
+        df_kpi_filtered = df_kpi_filtered[mask_kpi]
+
+yil = st.sidebar.selectbox("Yıl", ["Tümü"] + sorted(df["YIL"].dropna().unique()))
+if yil != "Tümü":
+    df = df[df["YIL"] == yil]
+
+ay = st.sidebar.selectbox("Ay", ["Tümü"] + AY_SIRA)
+
+# =================================================
+# KPI GÖSTERİMİ (DIM_PROJELER1'DEN)  ✅ ANA SAYFA İLE AYNI
+# =================================================
+def hesapla_kpi(df_dim: pd.DataFrame) -> dict:
+    sip = float(df_dim[COL_SIPARIS].sum()) if len(df_dim) else 0.0
+    sat = float(df_dim[COL_SATIS].sum()) if len(df_dim) else 0.0
+    mal = float(df_dim[COL_MALIYET].sum()) if len(df_dim) else 0.0
+    tah = float(df_dim[COL_TAHSIL].sum()) if len(df_dim) else 0.0
+
+    kar = sat - mal
+    kar_orani = (kar / sat * 100) if sat else 0.0
+
+    return {
+        "proje_sayisi": int(df_dim["ProjeKodu"].nunique()) if "ProjeKodu" in df_dim.columns else 0,
+        "siparis": sip,
+        "satis": sat,
+        "maliyet": mal,
+        "tahsilat": tah,
+        "kar": kar,
+        "kar_orani": kar_orani
+    }
+
+kpi = hesapla_kpi(df_kpi_filtered)
+
+k1, k2, k3, k4, k5, k6 = st.columns(6)
+k1.metric("Proje Sayısı", kpi["proje_sayisi"])
+k2.metric("Sipariş (€)", fmt_money(kpi["siparis"]))
+k3.metric("Satış (€)", fmt_money(kpi["satis"]))
+k4.metric("Maliyet (€)", fmt_money(kpi["maliyet"]))
+k5.metric("Tahsilat (€)", fmt_money(kpi["tahsilat"]))
+k6.metric("Kâr (€)", fmt_money(kpi["kar"]))
+st.caption(f"💡 **Kâr Oranı:** {kpi['kar_orani']:.2f}%".replace(".", ","))
+
+st.divider()
+
+# =================================================
+# GRAFİK – BAR + LINE
+# =================================================
+monthly = (
+    df.groupby(["AY", "AY_ADI"], as_index=False)
+      .agg(
+          Tahsilat=("PROJE GELEN EURO ÖDEMELERİ", "sum"),
+          Proje_Sayisi=("ProjeKodu", "nunique")
+      )
+)
+
+monthly = monthly.sort_values("AY")
+
+if monthly.empty:
+    st.warning("Seçilen filtrelerde grafik için veri bulunamadı.")
+else:
+    fig = px.bar(
+        monthly, x="AY_ADI", y="Tahsilat",
+        text=monthly["Tahsilat"].apply(lambda x: f"{fmt_money(x)} €"),
+        color_discrete_sequence=["#0A66C2"]
+    )
+
+    fig.add_scatter(
+        x=monthly["AY_ADI"], y=monthly["Proje_Sayisi"],
+        mode="lines+markers", name="Ödeme Gelen Proje Sayısı",
+        line=dict(color="#F4B400", width=3), marker=dict(size=8), yaxis="y2"
+    )
+
+    fig.update_layout(
+        yaxis2=dict(overlaying="y", side="right", title="Proje Sayısı"),
+        height=500, plot_bgcolor="white",
+        xaxis={'categoryorder': 'array', 'categoryarray': AY_SIRA},
+        margin=dict(l=20, r=20, t=30, b=20)
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+# =================================================
+# ALT KARTLAR (DETAYLAR)
+# =================================================
+if ay != "Tümü" or cari != "Tümü" or proje_ara != "":
+    if ay != "Tümü":
+        df_detay = df[df["AY_ADI"] == ay]
+        baslik = f"📦 {ay} Ayı Tahsilat Detayları"
+    else:
+        df_detay = df.copy()
+        baslik = f"📦 Filtrelenmiş Tahsilat Listesi"
+
+    st.subheader(baslik)
+    cols = st.columns(3)
+
+    for i, (idx, row) in enumerate(
+        df_detay.sort_values("PROJE GELEN EURO ÖDEMELERİ", ascending=False).iterrows()
+    ):
+        if "PROJE ÖDEMELERİNİN GELDİĞİ TARİH" in df_detay.columns:
+            dt_str = (
+                row["PROJE ÖDEMELERİNİN GELDİĞİ TARİH"].strftime("%d.%m.%Y")
+                if pd.notnull(row["PROJE ÖDEMELERİNİN GELDİĞİ TARİH"]) else "-"
+            )
+        else:
+            dt_str = "-"
+
+        html_card = f'''
+        <div style="background:#ffffff; padding:18px; border-radius:14px; margin-bottom:15px;
+                    box-shadow:0 4px 12px rgba(0,0,0,0.08); border-left: 5px solid #0A66C2;">
+            <div style="font-weight:700; font-size:16px; color:#333;">{row.get('ProjeKodu', '')}</div>
+            <div style="color:#666; font-size:14px; margin-bottom:8px;">{row.get('CARI_ISIM', '')}</div>
+            <div style="font-size:12px; color:#888;">
+                🏦 {row.get('BANKA', '')}<br>📅 {dt_str}
+            </div>
+            <div style="margin-top:10px; font-size:18px; font-weight:700; color:#0A66C2;">
+                € {fmt_money(row.get('PROJE GELEN EURO ÖDEMELERİ', 0))}
+            </div>
+        </div>
+        '''
+        with cols[i % 3]:
+            st.markdown(html_card, unsafe_allow_html=True)
 
